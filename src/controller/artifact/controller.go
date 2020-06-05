@@ -28,6 +28,8 @@ import (
 	_ "github.com/goharbor/harbor/src/controller/artifact/processor/chart"
 	// register CNAB resolver
 	_ "github.com/goharbor/harbor/src/controller/artifact/processor/cnab"
+	// register Model resolver
+	_ "github.com/goharbor/harbor/src/controller/artifact/processor/model"
 
 	"github.com/goharbor/harbor/src/controller/artifact/processor"
 	"github.com/goharbor/harbor/src/controller/event/metadata"
@@ -117,8 +119,6 @@ func NewController() Controller {
 		abstractor:   NewAbstractor(),
 	}
 }
-
-// TODO concurrency summary
 
 type controller struct {
 	tagCtl       tag.Controller
@@ -415,33 +415,17 @@ func (c *controller) copyDeeply(ctx context.Context, srcRepo, reference, dstRepo
 	digest := srcArt.Digest
 
 	// check the existence of artifact in the destination repository
-	if isRoot {
-		// for the root artifact, check the existence by calling "Count()"
-		// which finds the artifact based on all parent artifacts to avoid
-		// the issue: https://github.com/goharbor/harbor/issues/11222
-		n, err := c.artMgr.Count(ctx, &q.Query{
-			Keywords: map[string]interface{}{
-				"RepositoryName": dstRepo,
-				"Digest":         digest,
-			},
-		})
-		if err != nil {
-			return 0, err
-		}
-		if n > 0 {
-			return 0, errors.New(nil).WithCode(errors.ConflictCode).
-				WithMessage("the artifact %s@%s already exists", dstRepo, digest)
-		}
-	} else {
-		// for the child artifact, check the existence by calling "GetByReference" directly
-		dstArt, err := c.GetByReference(ctx, dstRepo, digest, option)
-		if err == nil {
-			// the child artifact already under the destination repository, skip
+	dstArt, err := c.GetByReference(ctx, dstRepo, digest, option)
+	if err == nil {
+		// the child artifact already exists under the destination repository, skip
+		if !isRoot {
 			return dstArt.ID, nil
 		}
-		if !errors.IsErr(err, errors.NotFoundCode) {
-			return 0, err
-		}
+		// the root parent already exists, goto next step to copy tags
+		goto tags
+	}
+	if !errors.IsErr(err, errors.NotFoundCode) {
+		return 0, err
 	}
 
 	// the artifact doesn't exist under the destination repository, continue to copy
@@ -457,6 +441,7 @@ func (c *controller) copyDeeply(ctx context.Context, srcRepo, reference, dstRepo
 		return 0, err
 	}
 
+tags:
 	// only copy the tags of outermost artifact
 	var tags []string
 	for _, tag := range srcArt.Tags {

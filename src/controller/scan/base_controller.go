@@ -15,8 +15,8 @@
 package scan
 
 import (
+	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"sync"
 
@@ -27,7 +27,6 @@ import (
 	sc "github.com/goharbor/harbor/src/controller/scanner"
 	"github.com/goharbor/harbor/src/core/config"
 	"github.com/goharbor/harbor/src/jobservice/job"
-	"github.com/goharbor/harbor/src/jobservice/logger"
 	"github.com/goharbor/harbor/src/lib/errors"
 	"github.com/goharbor/harbor/src/lib/log"
 	"github.com/goharbor/harbor/src/pkg/permission/types"
@@ -39,6 +38,7 @@ import (
 	"github.com/goharbor/harbor/src/pkg/scan/dao/scanner"
 	"github.com/goharbor/harbor/src/pkg/scan/report"
 	v1 "github.com/goharbor/harbor/src/pkg/scan/rest/v1"
+	"github.com/goharbor/harbor/src/pkg/scan/vuln"
 	"github.com/google/uuid"
 )
 
@@ -215,7 +215,7 @@ func (bc *basicController) Scan(ctx context.Context, artifact *ar.Artifact, opti
 	errs = errs[:0]
 	for _, param := range params {
 		if err := bc.scanArtifact(ctx, r, param.Artifact, param.TrackID, param.ProducesMimes); err != nil {
-			log.Warningf("scan artifact %s@%s failed, error: %v", artifact.RepositoryName, artifact.Digest, err)
+			log.G(ctx).Warningf("scan artifact %s@%s failed, error: %v", artifact.RepositoryName, artifact.Digest, err)
 			errs = append(errs, err)
 		}
 	}
@@ -296,7 +296,7 @@ func (bc *basicController) scanArtifact(ctx context.Context, r *scanner.Registra
 	// Insert the generated job ID now
 	// It will not block the whole process. If any errors happened, just logged.
 	if err := bc.manager.UpdateScanJobID(trackID, jobID); err != nil {
-		logger.Error(errors.Wrap(err, "scan controller: scan"))
+		log.G(ctx).Error(errors.Wrap(err, "scan controller: scan"))
 	}
 
 	return nil
@@ -359,8 +359,7 @@ func (bc *basicController) GetReport(ctx context.Context, artifact *ar.Artifact,
 		if len(group) != 0 {
 			reports = append(reports, group...)
 		} else {
-			// NOTE: If the artifact is OCI image, this happened when the artifact is not scanned.
-			// If the artifact is OCI image index, this happened when the artifact is not scanned,
+			// NOTE: If the artifact is OCI image, this happened when the artifact is not scanned,
 			// but its children artifacts may scanned so return empty report
 			return nil, nil
 		}
@@ -403,12 +402,7 @@ func (bc *basicController) GetSummary(ctx context.Context, artifact *ar.Artifact
 	return summaries, nil
 }
 
-// GetScanLog ...
-func (bc *basicController) GetScanLog(uuid string) ([]byte, error) {
-	if len(uuid) == 0 {
-		return nil, errors.New("empty uuid to get scan log")
-	}
-
+func (bc *basicController) getScanLog(uuid string) ([]byte, error) {
 	// Get by uuid
 	sr, err := bc.manager.Get(uuid)
 	if err != nil {
@@ -432,6 +426,73 @@ func (bc *basicController) GetScanLog(uuid string) ([]byte, error) {
 	return bc.jc().GetJobLog(sr.JobID)
 }
 
+// GetScanLog ...
+func (bc *basicController) GetScanLog(uuid string) ([]byte, error) {
+	if len(uuid) == 0 {
+		return nil, errors.New("empty uuid to get scan log")
+	}
+
+	reportIDs := vuln.ParseReportIDs(uuid)
+
+	errs := map[string]error{}
+	logs := make(map[string][]byte, len(reportIDs))
+
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	for _, reportID := range reportIDs {
+		wg.Add(1)
+
+		go func(reportID string) {
+			defer wg.Done()
+
+			log, err := bc.getScanLog(reportID)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				errs[reportID] = err
+			} else {
+				logs[reportID] = log
+			}
+		}(reportID)
+	}
+	wg.Wait()
+
+	if len(reportIDs) == 1 {
+		return logs[reportIDs[0]], errs[reportIDs[0]]
+	}
+
+	if len(errs) == len(reportIDs) {
+		for _, err := range errs {
+			return nil, err
+		}
+	}
+
+	var b bytes.Buffer
+
+	multiLogs := len(logs) > 1
+	for _, reportID := range reportIDs {
+		log, ok := logs[reportID]
+		if !ok || len(log) == 0 {
+			continue
+		}
+
+		if multiLogs {
+			if b.Len() > 0 {
+				b.WriteString("\n\n\n\n")
+			}
+			b.WriteString(fmt.Sprintf("---------- Logs of report %s ----------\n", reportID))
+		}
+
+		b.Write(log)
+	}
+
+	return b.Bytes(), nil
+}
+
 // HandleJobHooks ...
 func (bc *basicController) HandleJobHooks(trackID string, change *job.StatusChange) error {
 	if len(trackID) == 0 {
@@ -445,14 +506,22 @@ func (bc *basicController) HandleJobHooks(trackID string, change *job.StatusChan
 	// Clear robot account
 	// Only when the job is successfully done!
 	if change.Status == job.SuccessStatus.String() {
-		if v, ok := change.Metadata.Parameters[sca.JobParameterRobotID]; ok {
-			if rid, y := v.(float64); y {
-				if err := robot.RobotCtr.DeleteRobotAccount(int64(rid)); err != nil {
-					// Should not block the main flow, just logged
+		if v, ok := change.Metadata.Parameters[sca.JobParameterRobot]; ok {
+			if jsonData, y := v.(string); y {
+				r := &model.Robot{}
+				if err := r.FromJSON(jsonData); err != nil {
 					log.Error(errors.Wrap(err, "scan controller: handle job hook"))
-				} else {
-					log.Debugf("Robot account with id %d for the scan %s is removed", int64(rid), trackID)
 				}
+
+				if r.ID > 0 {
+					if err := robot.RobotCtr.DeleteRobotAccount(r.ID); err != nil {
+						// Should not block the main flow, just logged
+						log.Error(errors.Wrap(err, "scan controller: handle job hook"))
+					} else {
+						log.Debugf("Robot account with id %d for the scan %s is removed", r.ID, trackID)
+					}
+				}
+
 			}
 		}
 	}
@@ -554,14 +623,10 @@ func (bc *basicController) launchScanJob(trackID string, artifact *ar.Artifact, 
 		return "", errors.Wrap(err, "scan controller: launch scan job")
 	}
 
-	basic := fmt.Sprintf("%s:%s", robot.Name, robot.Token)
-	authorization := fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(basic)))
-
 	// Set job parameters
 	scanReq := &v1.ScanRequest{
 		Registry: &v1.Registry{
-			URL:           registryAddr,
-			Authorization: authorization,
+			URL: registryAddr,
 		},
 		Artifact: &v1.Artifact{
 			NamespaceID: artifact.ProjectID,
@@ -581,11 +646,17 @@ func (bc *basicController) launchScanJob(trackID string, artifact *ar.Artifact, 
 		return "", errors.Wrap(err, "launch scan job")
 	}
 
+	robotJSON, err := robot.ToJSON()
+	if err != nil {
+		return "", errors.Wrap(err, "launch scan job")
+	}
+
 	params := make(map[string]interface{})
 	params[sca.JobParamRegistration] = rJSON
+	params[sca.JobParameterAuthType] = registration.GetRegistryAuthorizationType()
 	params[sca.JobParameterRequest] = sJSON
 	params[sca.JobParameterMimes] = mimes
-	params[sca.JobParameterRobotID] = robot.ID
+	params[sca.JobParameterRobot] = robotJSON
 
 	// Launch job
 	callbackURL, err := bc.config(configCoreInternalAddr)

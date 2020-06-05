@@ -39,11 +39,15 @@ type NativeReportSummary struct {
 	CompleteCount int `json:"-"`
 }
 
+// IsSuccessStatus returns true when the scan status is success
+func (sum *NativeReportSummary) IsSuccessStatus() bool {
+	return sum.ScanStatus == job.SuccessStatus.String()
+}
+
 // Merge ...
 func (sum *NativeReportSummary) Merge(another *NativeReportSummary) *NativeReportSummary {
 	r := &NativeReportSummary{}
 
-	r.ReportID = sum.ReportID
 	r.StartTime = minTime(sum.StartTime, another.StartTime)
 	r.EndTime = maxTime(sum.EndTime, another.EndTime)
 	r.Duration = r.EndTime.Unix() - r.StartTime.Unix()
@@ -51,32 +55,9 @@ func (sum *NativeReportSummary) Merge(another *NativeReportSummary) *NativeRepor
 	r.TotalCount = sum.TotalCount + another.TotalCount
 	r.CompleteCount = sum.CompleteCount + another.CompleteCount
 	r.CompletePercent = r.CompleteCount * 100 / r.TotalCount
-
-	if sum.Severity.String() != "" && another.Severity.String() != "" {
-		if sum.Severity.Code() > another.Severity.Code() {
-			r.Severity = sum.Severity
-		} else {
-			r.Severity = another.Severity
-		}
-	} else if sum.Severity.String() != "" {
-		r.Severity = sum.Severity
-	} else {
-		r.Severity = another.Severity
-	}
-
-	if isRunningStatus(sum.ScanStatus) || isRunningStatus(another.ScanStatus) {
-		r.ScanStatus = job.RunningStatus.String()
-	} else {
-		diff := job.Status(sum.ScanStatus).Compare(job.Status(another.ScanStatus))
-		if diff < 0 {
-			r.ScanStatus = another.ScanStatus
-		} else if diff == 0 {
-			if job.Status(sum.ScanStatus) == job.SuccessStatus ||
-				job.Status(another.ScanStatus) == job.SuccessStatus {
-				r.ScanStatus = job.SuccessStatus.String()
-			}
-		}
-	}
+	r.ReportID = mergeReportID(sum.ReportID, another.ReportID)
+	r.Severity = mergeSeverity(sum.Severity, another.Severity)
+	r.ScanStatus = mergeScanStatus(sum.ScanStatus, another.ScanStatus)
 
 	if sum.Summary != nil && another.Summary != nil {
 		r.Summary = sum.Summary.Merge(another.Summary)
@@ -122,23 +103,3 @@ func (v *VulnerabilitySummary) Merge(a *VulnerabilitySummary) *VulnerabilitySumm
 
 // SeveritySummary ...
 type SeveritySummary map[Severity]int
-
-func minTime(t1, t2 time.Time) time.Time {
-	if t1.Before(t2) {
-		return t1
-	}
-
-	return t2
-}
-
-func maxTime(t1, t2 time.Time) time.Time {
-	if t1.Before(t2) {
-		return t2
-	}
-
-	return t1
-}
-
-func isRunningStatus(status string) bool {
-	return job.Status(status) == job.RunningStatus
-}

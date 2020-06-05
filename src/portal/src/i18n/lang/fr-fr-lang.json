@@ -167,7 +167,9 @@
         },
         "LOGS": "Logs",
         "TASKS": "Tasks",
-        "API_EXPLORER": "API EXPLORER"
+        "API_EXPLORER": "Api Explorer",
+        "HARBOR_API_MANAGEMENT": "Harbor API V2.0",
+        "HELM_API_MANAGEMENT": "Harbor API"
     },
     "USER": {
         "ADD_ACTION": "UTILISATEUR",
@@ -328,8 +330,8 @@
         "ENABLE_ACCOUNT": "permettre à compte ",
         "DELETE": "Supprimer",
         "CREAT_ROBOT_ACCOUNT": "créat robot compte ",
-        "PERMISSIONS_IMAGE": "Image",
-        "PERMISSIONS_HELMCHART": "Helm Chart",
+        "PERMISSIONS_ARTIFACT": "Artifact",
+        "PERMISSIONS_HELMCHART": "Helm Chart (Chart Museum)",
         "PUSH": "Push",
         "PULL": "Pull",
         "FILTER_PLACEHOLDER": "Filter Robot Accounts",
@@ -460,7 +462,7 @@
         "MONTH": "Month",
         "DAY_MONTH": "Day of month",
         "DAY_WEEK": "Day of week",
-        "CRON-TITLE": "Pattern description for cron '* * * * * *'",
+        "CRON_TITLE": "Pattern description for cron '* * * * * *'.The cron string is based on UTC time",
         "FIELD_NAME": "Field name",
         "MANDATORY": "Mandatory?",
         "ALLOWED_VALUES": "Allowed values",
@@ -629,9 +631,9 @@
         "COPY_DIGEST_ID": "Copier le Résumé",
         "DELETE": "Supprimer",
         "NAME": "Nom",
-        "TAGS_COUNT": "Tags",
+        "TAGS": "Tags",
         "PLATFORM": "OS/ARCH",
-        "ARTIFACT_TOOTIP": "Click this icon to enter the Artifact list of refer",
+        "ARTIFACT_TOOTIP": "Click to view this OCI index's artifact list",
         "ARTIFACTS_COUNT": "Artifacts",
         "PULL_COUNT": "Pulls",
         "PULL_COMMAND": "Commande de Pull",
@@ -775,6 +777,7 @@
         "SUB_TITLE_SUFIX": "logs"
     },
     "CONFIG": {
+        "HISTORY": "History",
         "TITLE": "Configuration",
         "AUTH": "Identification",
         "REPLICATION": "Réplication",
@@ -964,7 +967,7 @@
         "CHART": {
             "SCANNING_TIME": "Temps d'analyse complète :",
             "SCANNING_PERCENT": "Scan completed percent:",
-            "SCANNING_PERCENT_EXPLAIN": "(Scan completed percentage is calculated as # of successfully scanned images / total number of images referenced within the image index not including the index file itself and the images that do not support being scanned.)",
+            "SCANNING_PERCENT_EXPLAIN": "Scan completed percentage is calculated as # of successfully scanned images / total number of images referenced within the image index.",
             "TOOLTIPS_TITLE": "{{totalVulnerability}} de {{totalPackages}} {{package}} ont des {{vulnerability}} connues.",
             "TOOLTIPS_TITLE_SINGULAR": "{{totalVulnerability}} de {{totalPackages}} {{package}} a des {{vulnerability}} connues.",
             "TOOLTIPS_TITLE_ZERO": "No recognizable vulnerability found"
@@ -988,8 +991,14 @@
         "SCAN_NOW": "Analyser"
     },
     "PUSH_IMAGE": {
-        "TITLE": "Pousser l'Image",
-        "TOOLTIP": "Commandes de références pour pousser une image vers ce projet.",
+        "TITLE": "Push Command",
+        "DOCKER": "Docker",
+        "HELM": "Helm",
+        "CNAB": "CNAB",
+        "TAG_COMMAND_CHART": "Tag a chart for this project:",
+        "PUSH_COMMAND_CHART": "Push a chart to this project:",
+        "PUSH_COMMAND_CNAB": "Push a CNAB to this project:",
+        "TOOLTIP": "Command references for pushing an artifact to this project.",
         "TAG_COMMAND": "Tagger une image pour ce projet :",
         "PUSH_COMMAND": "Pousser une image dans ce projet :",
         "COPY_ERROR": "Copie échouée, veuillez essayer de copier manuellement les commandes de référence."
@@ -1113,7 +1122,7 @@
     },
     "UNKNOWN_ERROR": "Des erreurs inconnues sont survenues. Veuillez réessayer plus tard.",
     "UNAUTHORIZED_ERROR": "Votre session est invalide ou a expiré. Vous devez vous connecter pour continuer votre action.",
-    "REPO_READ_ONLY": "Harbor is set to read-only mode, Deleting repository, tag and pushing image will be disabled under read-only mode.",
+    "REPO_READ_ONLY": "Harbor is set to read-only mode, Deleting repository, artifact, tag and pushing image will be disabled under read-only mode.",
     "FORBIDDEN_ERROR": "Vous n'avez pas les privilèges appropriés pour effectuer l'action.",
     "GENERAL_ERROR": "Des erreurs sont survenues lors de l'appel à un service : {{param}}.",
     "BAD_REQUEST_ERROR": "Nous ne pouvons pas exécuter votre action à cause d'une mauvaise requête.",

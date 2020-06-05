@@ -169,18 +169,18 @@ func (d *daoTestSuite) TestCount() {
 	d.Require().Nil(err)
 	d.Equal(totalOfAll-1, totalOfUnTagged)
 
-	// invalid tags value
-	_, err = d.dao.Count(d.ctx, &q.Query{
+	// specific tag value
+	total, err := d.dao.Count(d.ctx, &q.Query{
 		Keywords: map[string]interface{}{
 			"RepositoryID": 1,
-			"Tags":         "invalid_value",
+			"Tags":         "latest",
 		},
 	})
-	d.Require().NotNil(err)
-	d.True(errors.IsErr(err, errors.BadRequestCode))
+	d.Require().Nil(err)
+	d.Equal(int64(1), total)
 
 	// query by repository ID and digest
-	total, err := d.dao.Count(d.ctx, &q.Query{
+	total, err = d.dao.Count(d.ctx, &q.Query{
 		Keywords: map[string]interface{}{
 			"RepositoryID": 1,
 			"Digest":       "parent_digest",
@@ -379,8 +379,8 @@ func (d *daoTestSuite) TestUpdate() {
 	now := time.Now()
 	err := d.dao.Update(d.ctx, &Artifact{
 		ID:       d.parentArtID,
-		PushTime: now,
-	}, "PushTime")
+		PullTime: now,
+	}, "PullTime")
 	d.Require().Nil(err)
 
 	artifact, err := d.dao.Get(d.ctx, d.parentArtID)

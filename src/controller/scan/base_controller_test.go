@@ -53,8 +53,9 @@ type ControllerTestSuite struct {
 	artifact     *artifact.Artifact
 	rawReport    string
 
-	ar artifact.Controller
-	c  Controller
+	reportMgr *reporttesting.Manager
+	ar        artifact.Controller
+	c         Controller
 }
 
 // TestController is the entry point of ControllerTestSuite.
@@ -163,6 +164,7 @@ func (suite *ControllerTestSuite) SetupSuite() {
 	mgr.On("Get", "rp-uuid-001").Return(reports[0], nil)
 	mgr.On("UpdateReportData", "rp-uuid-001", suite.rawReport, (int64)(10000)).Return(nil)
 	mgr.On("UpdateStatus", "the-uuid-123", "Success", (int64)(10000)).Return(nil)
+	suite.reportMgr = mgr
 
 	rc := &MockRobotController{}
 
@@ -190,8 +192,7 @@ func (suite *ControllerTestSuite) SetupSuite() {
 	// Set job parameters
 	req := &v1.ScanRequest{
 		Registry: &v1.Registry{
-			URL:           "https://core.com",
-			Authorization: "Basic " + base64.StdEncoding.EncodeToString([]byte(rname+":robot-account")),
+			URL: "https://core.com",
 		},
 		Artifact: &v1.Artifact{
 			NamespaceID: suite.artifact.ProjectID,
@@ -207,12 +208,17 @@ func (suite *ControllerTestSuite) SetupSuite() {
 	regJSON, err := suite.registration.ToJSON()
 	require.NoError(suite.T(), err)
 
+	rb, _ := rc.CreateRobotAccount(account)
+	robotJSON, err := rb.ToJSON()
+	require.NoError(suite.T(), err)
+
 	jc := &MockJobServiceClient{}
 	params := make(map[string]interface{})
 	params[sca.JobParamRegistration] = regJSON
 	params[sca.JobParameterRequest] = rJSON
 	params[sca.JobParameterMimes] = []string{v1.MimeTypeNativeReport}
-	params[sca.JobParameterRobotID] = int64(1)
+	params[sca.JobParameterAuthType] = "Basic"
+	params[sca.JobParameterRobot] = robotJSON
 
 	j := &jm.JobData{
 		Name: job.ImageScanJob,
@@ -286,6 +292,60 @@ func (suite *ControllerTestSuite) TestScanControllerGetScanLog() {
 		success = len(bytes) > 0
 		return
 	})
+}
+
+func (suite *ControllerTestSuite) TestScanControllerGetMultiScanLog() {
+	{
+		// Both success
+		suite.reportMgr.On("Get", "rp-uuid-002").Return(&scan.Report{
+			ID:               12,
+			UUID:             "rp-uuid-002",
+			Digest:           "digest-code",
+			RegistrationUUID: "uuid001",
+			MimeType:         "application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.0",
+			Status:           "Success",
+			StatusCode:       3,
+			TrackID:          "the-uuid-124",
+			JobID:            "the-job-id",
+			StatusRevision:   time.Now().Unix(),
+			Report:           suite.rawReport,
+			StartTime:        time.Now(),
+			EndTime:          time.Now().Add(2 * time.Second),
+		}, nil).Once()
+
+		bytes, err := suite.c.GetScanLog(base64.StdEncoding.EncodeToString([]byte("rp-uuid-001|rp-uuid-002")))
+		suite.Nil(err)
+		suite.NotEmpty(bytes)
+		suite.Contains(string(bytes), "Logs of report rp-uuid-001")
+		suite.Contains(string(bytes), "Logs of report rp-uuid-002")
+	}
+
+	{
+		// One successfully, one failed
+		suite.reportMgr.On("Get", "rp-uuid-002").Return(nil, fmt.Errorf("error")).Once()
+		bytes, err := suite.c.GetScanLog(base64.StdEncoding.EncodeToString([]byte("rp-uuid-001|rp-uuid-002")))
+		suite.Nil(err)
+		suite.NotEmpty(bytes)
+		suite.NotContains(string(bytes), "Logs of report rp-uuid-001")
+	}
+
+	{
+		// Both failed
+		suite.reportMgr.On("Get", "rp-uuid-002").Return(nil, fmt.Errorf("error")).Once()
+		suite.reportMgr.On("Get", "rp-uuid-003").Return(nil, fmt.Errorf("error")).Once()
+		bytes, err := suite.c.GetScanLog(base64.StdEncoding.EncodeToString([]byte("rp-uuid-002|rp-uuid-003")))
+		suite.Error(err)
+		suite.Empty(bytes)
+	}
+
+	{
+		// Both empty
+		suite.reportMgr.On("Get", "rp-uuid-002").Return(nil, nil).Once()
+		suite.reportMgr.On("Get", "rp-uuid-003").Return(nil, nil).Once()
+		bytes, err := suite.c.GetScanLog(base64.StdEncoding.EncodeToString([]byte("rp-uuid-002|rp-uuid-003")))
+		suite.Nil(err)
+		suite.Empty(bytes)
+	}
 }
 
 // TestScanControllerHandleJobHooks ...

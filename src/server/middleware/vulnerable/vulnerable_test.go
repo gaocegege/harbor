@@ -24,6 +24,7 @@ import (
 	"github.com/goharbor/harbor/src/common/models"
 	"github.com/goharbor/harbor/src/common/security"
 	"github.com/goharbor/harbor/src/controller/artifact"
+	"github.com/goharbor/harbor/src/controller/artifact/processor/image"
 	"github.com/goharbor/harbor/src/controller/project"
 	"github.com/goharbor/harbor/src/controller/scan"
 	"github.com/goharbor/harbor/src/lib"
@@ -79,7 +80,7 @@ func (suite *MiddlewareTestSuite) SetupTest() {
 	}
 
 	suite.artifact = &artifact.Artifact{}
-	suite.artifact.Type = artifact.ImageType
+	suite.artifact.Type = image.ArtifactTypeImage
 	suite.artifact.ProjectID = 1
 	suite.artifact.RepositoryName = "library/photon"
 	suite.artifact.Digest = "digest"
@@ -119,6 +120,16 @@ func (suite *MiddlewareTestSuite) makeRequest() *http.Request {
 	return req.WithContext(lib.WithArtifactInfo(req.Context(), info))
 }
 
+func (suite *MiddlewareTestSuite) TestNoArtifactInfo() {
+	mock.OnAnything(suite.artifactController, "GetByReference").Return(nil, fmt.Errorf("error"))
+
+	req := httptest.NewRequest("GET", "/v1/library/photon/manifests/2.0", nil)
+	rr := httptest.NewRecorder()
+
+	Middleware()(suite.next).ServeHTTP(rr, req)
+	suite.Equal(rr.Code, http.StatusNotFound)
+}
+
 func (suite *MiddlewareTestSuite) TestGetArtifactFailed() {
 	mock.OnAnything(suite.artifactController, "GetByReference").Return(nil, fmt.Errorf("error"))
 
@@ -152,7 +163,7 @@ func (suite *MiddlewareTestSuite) TestPreventionDisabled() {
 	suite.Equal(rr.Code, http.StatusOK)
 }
 
-func (suite *MiddlewareTestSuite) TestNonRobotPulling() {
+func (suite *MiddlewareTestSuite) TestNonScannerPulling() {
 	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
 	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
 	securityCtx := &securitytesting.Context{}
@@ -172,7 +183,7 @@ func (suite *MiddlewareTestSuite) TestScannerPulling() {
 	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
 	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
 	securityCtx := &securitytesting.Context{}
-	mock.OnAnything(securityCtx, "Name").Return("robot")
+	mock.OnAnything(securityCtx, "Name").Return("v2token")
 	mock.OnAnything(securityCtx, "Can").Return(true, nil)
 
 	req := suite.makeRequest()
@@ -220,6 +231,24 @@ func (suite *MiddlewareTestSuite) TestArtifactNotScanned() {
 	suite.Equal(rr.Code, http.StatusPreconditionFailed)
 }
 
+func (suite *MiddlewareTestSuite) TestArtifactScanFailed() {
+	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
+	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
+	mock.OnAnything(suite.checker, "IsScannable").Return(true, nil)
+	mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
+		v1.MimeTypeNativeReport: &vuln.NativeReportSummary{
+			ScanStatus:  "Error",
+			CVEBypassed: []string{"cve-2020"},
+		},
+	}, nil)
+
+	req := suite.makeRequest()
+	rr := httptest.NewRecorder()
+
+	Middleware()(suite.next).ServeHTTP(rr, req)
+	suite.Equal(rr.Code, http.StatusPreconditionFailed)
+}
+
 func (suite *MiddlewareTestSuite) TestGetSummaryFailed() {
 	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
 	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
@@ -233,13 +262,69 @@ func (suite *MiddlewareTestSuite) TestGetSummaryFailed() {
 	suite.Equal(rr.Code, http.StatusInternalServerError)
 }
 
+func (suite *MiddlewareTestSuite) TestBadSummary() {
+	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
+	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
+	mock.OnAnything(suite.checker, "IsScannable").Return(true, nil)
+	mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
+		v1.MimeTypeNativeReport: "bad report",
+	}, nil)
+
+	req := suite.makeRequest()
+	rr := httptest.NewRecorder()
+
+	Middleware()(suite.next).ServeHTTP(rr, req)
+	suite.Equal(rr.Code, http.StatusInternalServerError)
+}
+
+func (suite *MiddlewareTestSuite) TestNoVulnerabilities() {
+	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
+	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
+	mock.OnAnything(suite.checker, "IsScannable").Return(true, nil)
+	mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
+		v1.MimeTypeNativeReport: &vuln.NativeReportSummary{
+			ScanStatus:  "Success",
+			Severity:    vuln.Unknown,
+			CVEBypassed: []string{"cve-2020"},
+		},
+	}, nil)
+
+	req := suite.makeRequest()
+	rr := httptest.NewRecorder()
+
+	Middleware()(suite.next).ServeHTTP(rr, req)
+	suite.Equal(rr.Code, http.StatusOK)
+}
+
+func (suite *MiddlewareTestSuite) TestTotalVulnerabilitiesIsZero() {
+	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
+	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
+	mock.OnAnything(suite.checker, "IsScannable").Return(true, nil)
+	mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
+		v1.MimeTypeNativeReport: &vuln.NativeReportSummary{
+			ScanStatus:  "Success",
+			Severity:    vuln.Unknown,
+			Summary:     &vuln.VulnerabilitySummary{Total: 0},
+			CVEBypassed: []string{"cve-2020"},
+		},
+	}, nil)
+
+	req := suite.makeRequest()
+	rr := httptest.NewRecorder()
+
+	Middleware()(suite.next).ServeHTTP(rr, req)
+	suite.Equal(rr.Code, http.StatusOK)
+}
+
 func (suite *MiddlewareTestSuite) TestAllowed() {
 	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
 	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
 	mock.OnAnything(suite.checker, "IsScannable").Return(true, nil)
 	mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
 		v1.MimeTypeNativeReport: &vuln.NativeReportSummary{
+			ScanStatus:  "Success",
 			Severity:    vuln.Low,
+			Summary:     &vuln.VulnerabilitySummary{Total: 1},
 			CVEBypassed: []string{"cve-2020"},
 		},
 	}, nil)
@@ -255,17 +340,44 @@ func (suite *MiddlewareTestSuite) TestPrevented() {
 	mock.OnAnything(suite.artifactController, "GetByReference").Return(suite.artifact, nil)
 	mock.OnAnything(suite.projectController, "Get").Return(suite.project, nil)
 	mock.OnAnything(suite.checker, "IsScannable").Return(true, nil)
-	mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
-		v1.MimeTypeNativeReport: &vuln.NativeReportSummary{
-			Severity: vuln.Critical,
-		},
-	}, nil)
 
-	req := suite.makeRequest()
-	rr := httptest.NewRecorder()
+	{
+		// only one vulnerability
+		mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
+			v1.MimeTypeNativeReport: &vuln.NativeReportSummary{
+				ScanStatus: "Success",
+				Severity:   vuln.Critical,
+				Summary:    &vuln.VulnerabilitySummary{Total: 1},
+			},
+		}, nil).Once()
 
-	Middleware()(suite.next).ServeHTTP(rr, req)
-	suite.Equal(rr.Code, http.StatusPreconditionFailed)
+		req := suite.makeRequest()
+		rr := httptest.NewRecorder()
+
+		Middleware()(suite.next).ServeHTTP(rr, req)
+		suite.Equal(rr.Code, http.StatusPreconditionFailed)
+
+		suite.Contains(rr.Body.String(), "current image with 1 vulnerability cannot be pulled")
+	}
+
+	{
+		// multiple vulnerabilities
+		mock.OnAnything(suite.scanController, "GetSummary").Return(map[string]interface{}{
+			v1.MimeTypeNativeReport: &vuln.NativeReportSummary{
+				ScanStatus: "Success",
+				Severity:   vuln.Critical,
+				Summary:    &vuln.VulnerabilitySummary{Total: 2},
+			},
+		}, nil).Once()
+
+		req := suite.makeRequest()
+		rr := httptest.NewRecorder()
+
+		Middleware()(suite.next).ServeHTTP(rr, req)
+		suite.Equal(rr.Code, http.StatusPreconditionFailed)
+
+		suite.Contains(rr.Body.String(), "current image with 2 vulnerabilities cannot be pulled")
+	}
 }
 
 func (suite *MiddlewareTestSuite) TestArtifactIsImageIndex() {

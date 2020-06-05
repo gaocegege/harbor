@@ -18,9 +18,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/goharbor/harbor/src/common/rbac"
-	"github.com/goharbor/harbor/src/common/security"
-	"github.com/goharbor/harbor/src/controller/artifact"
+	"github.com/goharbor/harbor/src/controller/artifact/processor/cnab"
+	"github.com/goharbor/harbor/src/controller/artifact/processor/image"
 	"github.com/goharbor/harbor/src/controller/project"
 	"github.com/goharbor/harbor/src/controller/scan"
 	"github.com/goharbor/harbor/src/lib"
@@ -30,6 +29,7 @@ import (
 	v1 "github.com/goharbor/harbor/src/pkg/scan/rest/v1"
 	"github.com/goharbor/harbor/src/pkg/scan/vuln"
 	"github.com/goharbor/harbor/src/server/middleware"
+	"github.com/goharbor/harbor/src/server/middleware/util"
 )
 
 var (
@@ -48,7 +48,7 @@ func Middleware() func(http.Handler) http.Handler {
 		none := lib.ArtifactInfo{}
 		info := lib.GetArtifactInfo(ctx)
 		if info == none {
-			return fmt.Errorf("artifactinfo middleware required before this middleware")
+			return errors.New("artifactinfo middleware required before this middleware").WithCode(errors.NotFoundCode)
 		}
 
 		art, err := artifactController.GetByReference(ctx, info.Repository, info.Reference, nil)
@@ -71,10 +71,7 @@ func Middleware() func(http.Handler) http.Handler {
 			return nil
 		}
 
-		securityCtx, ok := security.FromContext(ctx)
-		if ok &&
-			securityCtx.Name() == "robot" &&
-			securityCtx.Can(rbac.ActionScannerPull, rbac.NewProjectNamespace(proj.ProjectID).Resource(rbac.ResourceRepository)) {
+		if util.SkipPolicyChecking(ctx, proj.ProjectID) {
 			// the artifact is pulling by the scanner, skip the checking
 			logger.Debugf("artifact %s@%s is pulling by the scanner, skip the checking", art.RepositoryName, art.Digest)
 			return nil
@@ -101,10 +98,13 @@ func Middleware() func(http.Handler) http.Handler {
 			return err
 		}
 
+		projectSeverity := vuln.ParseSeverityVersion3(proj.Severity())
+
 		rawSummary, ok := summaries[v1.MimeTypeNativeReport]
 		if !ok {
 			// No report yet?
-			msg := "vulnerability prevention enabled, but no scan report existing for the artifact"
+			msg := fmt.Sprintf(`current image without vulnerability scanning cannot be pulled due to configured policy in 'Prevent images with vulnerability severity of "%s" or higher from running.' `+
+				`To continue with pull, please contact your project administrator for help.`, projectSeverity)
 			return errors.New(nil).WithCode(errors.PROJECTPOLICYVIOLATION).WithMessage(msg)
 		}
 
@@ -115,7 +115,7 @@ func Middleware() func(http.Handler) http.Handler {
 
 		if art.IsImageIndex() {
 			// artifact is image index, skip the checking when it is in the whitelist
-			skippingWhitelist := []string{artifact.ImageType, artifact.CNABType}
+			skippingWhitelist := []string{image.ArtifactTypeImage, cnab.ArtifactTypeCNAB}
 			for _, t := range skippingWhitelist {
 				if art.Type == t {
 					logger.Debugf("artifact %s@%s is image index and its type is %s in skipping whitelist, "+
@@ -125,18 +125,35 @@ func Middleware() func(http.Handler) http.Handler {
 			}
 		}
 
+		if !summary.IsSuccessStatus() {
+			msg := fmt.Sprintf(`current image with "%s" status of vulnerability scanning cannot be pulled due to configured policy in 'Prevent images with vulnerability severity of "%s" or higher from running.' `+
+				`To continue with pull, please contact your project administrator for help.`, summary.ScanStatus, projectSeverity)
+			return errors.New(nil).WithCode(errors.PROJECTPOLICYVIOLATION).WithMessage(msg)
+		}
+
+		if summary.Summary == nil || summary.Summary.Total == 0 {
+			// No vulnerabilities found in the artifact, skip the checking
+			// See https://github.com/goharbor/harbor/issues/11210 to get more details
+			logger.Debugf("no vulnerabilities found in artifact %s@%s, skip the vulnerability prevention checking", art.RepositoryName, art.Digest)
+			return nil
+		}
+
 		// Do judgement
-		severity := vuln.ParseSeverityVersion3(proj.Severity())
-		if summary.Severity.Code() >= severity.Code() {
-			msg := fmt.Sprintf("current image with '%q vulnerable' cannot be pulled due to configured policy in 'Prevent images with vulnerability severity of %q from running.' "+
-				"Please contact your project administrator for help'", summary.Severity, severity)
+		if summary.Severity.Code() >= projectSeverity.Code() {
+			thing := "vulnerability"
+			if summary.Summary.Total > 1 {
+				thing = "vulnerabilities"
+			}
+			msg := fmt.Sprintf(`current image with %d %s cannot be pulled due to configured policy in 'Prevent images with vulnerability severity of "%s" or higher from running.' `+
+				`To continue with pull, please contact your project administrator to exempt matched vulnerabilities through configuring the CVE whitelist.`,
+				summary.Summary.Total, thing, projectSeverity)
 			return errors.New(nil).WithCode(errors.PROJECTPOLICYVIOLATION).WithMessage(msg)
 		}
 
 		// Print scannerPull CVE list
 		if len(summary.CVEBypassed) > 0 {
 			for _, cve := range summary.CVEBypassed {
-				logger.Infof("Vulnerable policy check: scannerPull CVE %s", cve)
+				logger.Infof("Vulnerable policy check: bypassed CVE %s", cve)
 			}
 		}
 
